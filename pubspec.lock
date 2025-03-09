@@ -91,6 +91,22 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  http:
+    dependency: "direct main"
+    description:
+      name: http
+      sha256: fe7ab022b76f3034adc518fb6ea04a82387620e19977665ea18d30a1cf43442f
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.3.0"
+  http_parser:
+    dependency: transitive
+    description:
+      name: http_parser
+      sha256: "178d74305e7866013777bab2c3d8726205dc5a4dd935297175b19a23a2e66571"
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.1.2"
   leak_tracker:
     dependency: transitive
     description:
@@ -151,10 +167,10 @@ packages:
     dependency: "direct main"
     description:
       name: mqtt_client
-      sha256: "85fa7e9aad03fbd6a54fcaf46127579f3e049b4834557a06e49aea7869b04c94"
+      sha256: ba10ec490ded55dc4e77bbc992529d823fb15d0d5ec68c2895f960312060c541
       url: "https://pub.dev"
     source: hosted
-    version: "10.8.0"
+    version: "9.8.1"
   path:
     dependency: transitive
     description:

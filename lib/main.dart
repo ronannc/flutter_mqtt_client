@@ -1,5 +1,7 @@
-import 'package:flutter/foundation.dart';
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 
@@ -7,124 +9,176 @@ void main() {
   runApp(MyApp());
 }
 
-class MyApp extends StatefulWidget {
+class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
   @override
-  MyAppState createState() => MyAppState();
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'IoT Flutter App',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: MyHomePage(),
+    );
+  }
 }
 
-class MyAppState extends State<MyApp> {
-  final client = MqttServerClient('a2jxh5h70e80uc-ats.iot.us-east-1.amazonaws.com', '');
-
-  String mensagemRecebida = 'Nenhuma mensagem recebida ainda';
+class MyHomePage extends StatefulWidget {
+  const MyHomePage({super.key});
 
   @override
-  void initState() {
-    super.initState();
-    _mqttConnect();
+  MyHomePageState createState() => MyHomePageState();
+}
+
+class MyHomePageState extends State<MyHomePage> {
+  final TextEditingController _clientIdController = TextEditingController();
+  final TextEditingController _messageController = TextEditingController();
+  final ValueNotifier<String?> _valueListenableBuilder = ValueNotifier(null);
+  late final MqttServerClient? _client;
+  late final String? clientId;
+  final String host = 'http://localhost:8000';
+
+  /// Registra o cliente no AWS Iot Core, criando certificado, policy, think e
+  /// associando tudo.
+  Future<void> _registerClient() async {
+    clientId = _clientIdController.text;
+    final response = await http.post(
+      Uri.parse('$host/api/register-client'),
+      body: {'client_id': clientId},
+    );
+    if (response.statusCode == 200) {
+      await connectClient(jsonDecode(response.body));
+    } else {
+      throw Exception('Erro ao configurar Iot para o cliente');
+    }
   }
 
-  Future<void> _mqttConnect() async {
-    client.port = 1883;
-    // client.keepAlivePeriod = 20;
-    client.onDisconnected = _onDisconnected;
-    client.logging(on: true);
+  Future<void> connectClient(Map<String, dynamic> clientData) async {
+    _client = MqttServerClient(clientData['endpoint'], clientId!);
 
-    // Configuração de callbacks
-    client.onConnected = _onConnected;
-    client.onSubscribed = _onSubscribed;
+    // Porta para ssl/tls
+    _client!.port = 8883;
+    _client.secure = true;
+    _client.securityContext = SecurityContext.defaultContext;
+    _client.securityContext.useCertificateChainBytes(
+      utf8.encode(clientData['certificatePem']),
+    );
+    _client.securityContext.usePrivateKeyBytes(
+      utf8.encode(clientData['privateKey']),
+    );
+    // _client.keepAlivePeriod = 120;
 
-    final connMess = MqttConnectMessage()
-        .withClientIdentifier('flutter_client')
-        .startClean(); // Limpa a sessão anterior
+    // Callbacks
+    _client.onDisconnected = onDisconnected;
+    _client.onConnected = onConnected;
+    _client.onSubscribed = onSubscribed;
 
-    client.connectionMessage = connMess;
+    _client.logging(on: true); // Habilita logs para debug
 
     try {
-      await client.connect();
-    } catch (e) {
-      if (kDebugMode) {
-        print('Erro de conexão: $e');
-      }
-      client.disconnect();
+      final connMessage = MqttConnectMessage()
+          .withClientIdentifier(clientId!)
+          .startClean() // Inicia uma nova sessão limpa
+          .withWillQos(MqttQos.atMostOnce);
+      _client.connectionMessage = connMessage;
+      await _client.connect();
+
+      // Depois de conectar, se inscreve num topico
+      _client.subscribe('client/$clientId', MqttQos.atMostOnce);
+
+      _clientsUpdates();
+      _clientPublish();
+    } on NoConnectionException catch (e) {
+      print('NoConnectionException - $e');
+      _client.disconnect();
+    } on SocketException catch (e) {
+      print('SocketException - $e');
+      _client.disconnect();
     }
+  }
 
-    // Inscrição no tópico
-    const topico = 'mqtt_teste';
-    client.subscribe(topico, MqttQos.atMostOnce);
-
-    // Escuta de mensagens
-    client.updates?.listen((List<MqttReceivedMessage<MqttMessage?>>? c) {
-      final recMess = c![0].payload as MqttPublishMessage;
-      final pt =
-      MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
-
-      setState(() {
-        mensagemRecebida = pt;
-      });
-
-      print('Mensagem recebida no tópico ${c[0].topic}: $pt');
+  void _clientPublish() {
+    _client!.published!.listen((MqttPublishMessage message) {
+      print(
+        'Menssagem publicada no topico: ${message.variableHeader!.topicName}',
+      );
     });
   }
 
-  void _publicarMensagem(String mensagem) {
-    const topico = 'meu/dispositivo/temperatura';
+  void _clientsUpdates() {
+    _client!.updates!.listen((List<MqttReceivedMessage<MqttMessage?>>? c) {
+      final recMess = c![0].payload as MqttPublishMessage;
+      final pt = MqttPublishPayload.bytesToStringAsString(
+        recMess.payload.message,
+      );
+      print("Topico: ${c[0].topic}: $pt");
+      _valueListenableBuilder.value = "Topico: ${c[0].topic}: $pt";
+    });
+  }
+
+  void onSubscribed(String topic) {
+    print('Subscrição confirmada para o topico: $topic');
+  }
+
+  void onDisconnected() {
+    print('OnDisconnected cliente callback');
+    if (_client!.connectionStatus!.disconnectionOrigin ==
+        MqttDisconnectionOrigin.solicited) {
+      print('OnDisconnected callback foi solicitado, tudo certo!');
+    } else {
+      print('OnDisconnected callback nao solicitado, algo errado!');
+    }
+  }
+
+  void onConnected() {
+    print('Cliente conectado com sucesso!');
+  }
+
+  void publishMessage(String message) {
     final builder = MqttClientPayloadBuilder();
-    builder.addString(mensagem);
-
-    client.publishMessage(topico, MqttQos.atMostOnce, builder.payload!);
-
-    print('Mensagem publicada: $mensagem');
-  }
-
-  void _onConnected() {
-    print('Conectado ao broker MQTT!');
-  }
-
-  void _onDisconnected() {
-    print('Desconectado do broker MQTT.');
-  }
-
-  void _onSubscribed(String topic) {
-    print('Inscrito no tópico: $topic');
+    builder.addString(message);
+    _client!.publishMessage(
+      "client/$clientId",
+      MqttQos.atMostOnce,
+      builder.payload!,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    TextEditingController controladorMensagem = TextEditingController();
-
-    return MaterialApp(
-      home: Scaffold(
-        appBar: AppBar(
-          title: Text('Exemplo MQTT em Flutter'),
-        ),
-        body: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            children: [
-              Text(
-                'Mensagem recebida: $mensagemRecebida',
-                style: TextStyle(fontSize: 18),
-              ),
-              SizedBox(height: 20),
-              TextField(
-                controller: controladorMensagem,
-                decoration: InputDecoration(
-                  labelText: 'Digite uma mensagem para publicar',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              SizedBox(height: 10),
-              ElevatedButton(
-                onPressed: () {
-                  _publicarMensagem(controladorMensagem.text);
-                  controladorMensagem.clear();
-                },
-                child: Text('Publicar Mensagem'),
-              ),
-            ],
-          ),
+    return Scaffold(
+      appBar: AppBar(title: Text('IoT Flutter App')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            TextField(
+              controller: _clientIdController,
+              decoration: InputDecoration(labelText: 'Cliente ID'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                await _registerClient();
+              },
+              child: Text('Registrar e conectar'),
+            ),
+            SizedBox(height: 10),
+            TextField(
+              controller: _messageController,
+              decoration: InputDecoration(labelText: 'Menssagem'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                publishMessage(_messageController.text);
+              },
+              child: Text('Publicar menssagem'),
+            ),
+            ValueListenableBuilder(
+              valueListenable: _valueListenableBuilder,
+              builder: (context, value, child) {
+                return Text(value ?? 'Nada publicado ainda!');
+              },
+            ),
+          ],
         ),
       ),
     );
